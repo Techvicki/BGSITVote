@@ -5,6 +5,7 @@ import LandingPage from '@/pages/LandingPage';
 import Dashboard from '@/pages/Dashboard';
 import FacultyDashboard from '@/pages/FacultyDashboard';
 import BallotPage from '@/pages/BallotPage';
+import ElectionResultsView from '@/components/ElectionResultsView';
 import type { Election } from '@/lib/supabase';
 import { Loader2 } from 'lucide-react';
 
@@ -37,6 +38,17 @@ function AppContent() {
   }
 
   if (selectedElection) {
+    if (selectedElection.status === 'results_published') {
+      return (
+        <div className="min-h-screen bg-slate-canvas py-8 px-4 lg:px-8 max-w-5xl mx-auto">
+          <ElectionResultsView
+            election={selectedElection}
+            isFaculty={false}
+            onBack={() => setSelectedElection(null)}
+          />
+        </div>
+      );
+    }
     return (
       <BallotPage
         election={selectedElection}

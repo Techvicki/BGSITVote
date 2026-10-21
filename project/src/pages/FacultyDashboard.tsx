@@ -7,7 +7,8 @@ import {
   Square, Users, X, Target, UserCog, UserCircle, UserCheck, Mail, BadgeCheck,
   AlertTriangle, Gavel, Trash2, Edit3, Upload, Image as ImageIcon, Ban, Flag,
   ShieldAlert, FileText, XCircle, RotateCcw, Sparkles, Search, Filter, Award, Eye,
-  Timer, Hourglass, Infinity as InfinityIcon, UserPlus, Key, Copy, ExternalLink, Calendar
+  Timer, Hourglass, Infinity as InfinityIcon, UserPlus, Key, Copy, ExternalLink, Calendar,
+  Trophy
 } from 'lucide-react';
 import {
   type ElectionRule,
@@ -29,6 +30,7 @@ import {
 } from '@/lib/electionTimer';
 import LiveCountdownTimer from '@/components/LiveCountdownTimer';
 import CustomTimerSetting, { type CustomTimerValues } from '@/components/CustomTimerSetting';
+import ElectionResultsView from '@/components/ElectionResultsView';
 import {
   createStudentCandidateProfile,
   type StudentCredentialResult,
@@ -281,7 +283,12 @@ export default function FacultyDashboard() {
             />
           )}
           {tab === 'results' && (
-            <ResultsPanel elections={elections} participation={participation} />
+            <ResultsPanel
+              elections={elections}
+              selectedElection={selectedElection}
+              onSelectElection={loadElectionDetails}
+              onRefresh={loadDashboard}
+            />
           )}
           {tab === 'profile' && (
             <ProfilePanel profile={profile} onSignOut={signOut} />
@@ -372,6 +379,7 @@ function ElectionManager({ elections, selected, onSelect, onCreated }: {
   const [saving, setSaving] = useState(false);
   const [editingTimer, setEditingTimer] = useState(false);
   const [savingTimer, setSavingTimer] = useState(false);
+  const [deletingElection, setDeletingElection] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [form, setForm] = useState({
     title: '', academicYear: '2026–27', description: '', category: 'Student Governance',
@@ -386,6 +394,29 @@ function ElectionManager({ elections, selected, onSelect, onCreated }: {
   }
   function toggleSem(s: string) {
     setForm((f) => ({ ...f, semesters: f.semesters.includes(s) ? f.semesters.filter((x) => x !== s) : [...f.semesters, s] }));
+  }
+
+  async function handleDeleteElection() {
+    if (!selected) return;
+    if (!confirm(`Are you sure you want to permanently delete the election "${selected.title}" and all its records? This will remove all associated candidates and false records.`)) {
+      return;
+    }
+    setDeletingElection(true);
+    try {
+      await supabase.from('secret_ballots').delete().eq('election_id', selected.id);
+      await supabase.from('voting_participation').delete().eq('election_id', selected.id);
+      await supabase.from('student_eligibility').delete().eq('election_id', selected.id);
+      await supabase.from('candidates').delete().eq('election_id', selected.id);
+      await supabase.from('election_positions').delete().eq('election_id', selected.id);
+      await supabase.from('election_managers').delete().eq('election_id', selected.id);
+      const { error } = await supabase.from('elections').delete().eq('id', selected.id);
+      if (error) throw error;
+      await onCreated(`Election "${selected.title}" and its records have been permanently deleted.`);
+    } catch (err) {
+      alert(`Could not delete election: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setDeletingElection(false);
+    }
   }
 
   async function handleUpdateElectionTimer(values: CustomTimerValues) {
@@ -585,13 +616,24 @@ function ElectionManager({ elections, selected, onSelect, onCreated }: {
 
           <div className="pt-4 border-t border-slate-border flex flex-wrap items-center justify-between gap-3">
             <LiveCountdownTimer status={selected.status} opensAt={selected.opens_at} closesAt={selected.closes_at} variant="compact" />
-            <button
-              onClick={() => setEditingTimer(!editingTimer)}
-              className="btn-secondary inline-flex items-center gap-1.5 text-xs py-1.5 px-3 bg-white hover:border-civic"
-            >
-              <Timer className="w-3.5 h-3.5 text-civic" />
-              {editingTimer ? 'Hide Custom Timer' : 'Configure Custom Timer Settings'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setEditingTimer(!editingTimer)}
+                className="btn-secondary inline-flex items-center gap-1.5 text-xs py-1.5 px-3 bg-white hover:border-civic"
+              >
+                <Timer className="w-3.5 h-3.5 text-civic" />
+                {editingTimer ? 'Hide Custom Timer' : 'Configure Custom Timer Settings'}
+              </button>
+              <button
+                onClick={handleDeleteElection}
+                disabled={deletingElection}
+                className="btn-secondary inline-flex items-center gap-1 text-xs py-1.5 px-3 text-error-deep border-error/30 hover:bg-error-bg"
+                title="Delete this election and remove all associated records"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                {deletingElection ? 'Deleting...' : 'Delete Election'}
+              </button>
+            </div>
           </div>
 
           {editingTimer && (
@@ -1216,6 +1258,7 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
     party: '',
     symbol: '',
     imageUrl: '',
+    intro: '',
     manifesto: '',
     autoApprove: true,
   });
@@ -1225,15 +1268,21 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
     fullName: '',
     studentId: '',
     email: '',
-    password: 'Student@123',
+    password: '',
     department: '',
-    semester: '5',
+    semester: '',
     positionId: '',
     party: '',
     symbol: '',
     imageUrl: '',
+    intro: '',
     manifesto: '',
   });
+
+  // False records purge modal states
+  const [showPurgeModal, setShowPurgeModal] = useState(false);
+  const [selectedPurgeIds, setSelectedPurgeIds] = useState<string[]>([]);
+  const [purging, setPurging] = useState(false);
 
   // Extract rules for disqualification modal
   const { rules: electionRules } = parseElectionRules(election?.instructions, election?.id ?? '');
@@ -1308,7 +1357,7 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
         fullName: studentForm.fullName,
         studentId: studentForm.studentId,
         email: studentForm.email,
-        password: studentForm.password,
+        password: studentForm.password || 'Student@2026',
         department: studentForm.department,
         semester: studentForm.semester,
         electionId: election.id,
@@ -1316,6 +1365,7 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
         party: studentForm.party,
         symbol: studentForm.symbol,
         imageUrl: studentForm.imageUrl,
+        intro: studentForm.intro,
         manifesto: studentForm.manifesto,
       }, pos?.name ?? 'Elective Post');
 
@@ -1325,13 +1375,14 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
         fullName: '',
         studentId: '',
         email: '',
-        password: 'Student@123',
+        password: '',
         department: '',
-        semester: '5',
+        semester: '',
         positionId: '',
         party: '',
         symbol: '',
         imageUrl: '',
+        intro: '',
         manifesto: '',
       });
       onNotice({
@@ -1359,6 +1410,8 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
     const serializedManifesto = serializeCandidateManifesto(form.manifesto, {
       party: form.party.trim() || undefined,
       symbol: form.symbol.trim() || undefined,
+      intro: form.intro.trim() || undefined,
+      branch: form.faculty,
     });
 
     const { data: newId, error } = await supabase.rpc('create_candidate', {
@@ -1405,6 +1458,7 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
       party: '',
       symbol: '',
       imageUrl: '',
+      intro: '',
       manifesto: '',
       autoApprove: true,
     });
@@ -1424,6 +1478,7 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
       party: meta.party ?? '',
       symbol: meta.symbol ?? '',
       imageUrl: candidate.image_url ?? '',
+      intro: meta.intro ?? '',
       manifesto: cleanManifesto,
       autoApprove: candidate.application_status === 'approved',
     });
@@ -1438,6 +1493,8 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
       ...existingMeta,
       party: form.party.trim() || undefined,
       symbol: form.symbol.trim() || undefined,
+      intro: form.intro.trim() || undefined,
+      branch: form.faculty,
     };
 
     const serializedManifesto = serializeCandidateManifesto(form.manifesto, updatedMeta);
@@ -1462,19 +1519,70 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
     }
 
     setEditingCandidate(null);
-    onNotice({ type: 'success', text: `Candidate details for ${form.name.trim()} updated.` });
+    onNotice({ type: 'success', text: `Candidate ${form.name.trim()} updated successfully.` });
     await onRefresh();
   }
 
-  async function deleteCandidate(candidate: Candidate) {
-    if (!window.confirm(`Are you sure you want to delete candidate ${candidate.name} (${candidate.student_id})?`)) return;
-    const { error } = await supabase.from('candidates').delete().eq('id', candidate.id);
-    if (error) {
-      onNotice({ type: 'error', text: `Could not delete candidate: ${error.message}` });
+  async function handleDeleteCandidate(candidateId: string, candidateName: string) {
+    if (!confirm(`Are you sure you want to permanently delete candidate "${candidateName}" and remove their record? This will clean up all associated records.`)) {
       return;
     }
-    onNotice({ type: 'success', text: `Candidate ${candidate.name} deleted.` });
-    await onRefresh();
+    setSaving(true);
+    try {
+      await supabase.from('secret_ballots').delete().eq('candidate_id', candidateId);
+      await supabase.from('candidate_applications').delete().eq('candidate_id', candidateId);
+      const { error } = await supabase.from('candidates').delete().eq('id', candidateId);
+      if (error) throw error;
+      onNotice({ type: 'success', text: `Candidate "${candidateName}" and their records removed.` });
+      await onRefresh();
+    } catch (err) {
+      onNotice({ type: 'error', text: err instanceof Error ? err.message : 'Failed to delete candidate.' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleBatchPurge() {
+    if (selectedPurgeIds.length === 0) {
+      onNotice({ type: 'error', text: 'Select at least one candidate record to remove.' });
+      return;
+    }
+    if (!confirm(`Permanently delete ${selectedPurgeIds.length} candidate record(s)? This will permanently remove all selected false/test records.`)) {
+      return;
+    }
+    setPurging(true);
+    try {
+      for (const cid of selectedPurgeIds) {
+        await supabase.from('secret_ballots').delete().eq('candidate_id', cid);
+        await supabase.from('candidate_applications').delete().eq('candidate_id', cid);
+        await supabase.from('candidates').delete().eq('id', cid);
+      }
+      onNotice({ type: 'success', text: `Successfully purged ${selectedPurgeIds.length} candidate record(s).` });
+      setShowPurgeModal(false);
+      setSelectedPurgeIds([]);
+      await onRefresh();
+    } catch (err) {
+      onNotice({ type: 'error', text: err instanceof Error ? err.message : 'Failed to purge records.' });
+    } finally {
+      setPurging(false);
+    }
+  }
+
+  async function deleteCandidate(candidate: Candidate) {
+    if (!window.confirm(`Are you sure you want to permanently delete candidate ${candidate.name} (${candidate.student_id}) and remove all their records?`)) return;
+    try {
+      await supabase.from('secret_ballots').delete().eq('candidate_id', candidate.id);
+      await supabase.from('candidate_applications').delete().eq('candidate_id', candidate.id);
+      const { error } = await supabase.from('candidates').delete().eq('id', candidate.id);
+      if (error) {
+        onNotice({ type: 'error', text: `Could not delete candidate: ${error.message}` });
+        return;
+      }
+      onNotice({ type: 'success', text: `Candidate ${candidate.name} and their records were removed.` });
+      await onRefresh();
+    } catch (err) {
+      onNotice({ type: 'error', text: err instanceof Error ? err.message : 'Failed to delete candidate.' });
+    }
   }
 
   function openDisqualifyModal(candidate: Candidate) {
@@ -1589,9 +1697,122 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
             >
               <Plus className="h-4 w-4" /> Add candidate to post
             </button>
+            {candidates.length > 0 && (
+              <button
+                onClick={() => {
+                  setSelectedPurgeIds([]);
+                  setShowPurgeModal(true);
+                }}
+                className="btn-secondary inline-flex items-center justify-center gap-1.5 text-xs py-2 px-3 text-error-deep border-error/30 hover:bg-error-bg"
+                title="Remove false, mock, or test candidate records"
+              >
+                <Trash2 className="h-4 w-4" /> Purge False Records ({candidates.length})
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {/* Purge False / Test Records Modal */}
+      {showPurgeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-navy-deep/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white rounded-xl shadow-tier2 max-w-lg w-full p-6 animate-scaleIn border border-error/40 max-h-[85vh] flex flex-col">
+            <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-border">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-error-bg text-error-deep flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-navy-deep">Purge False / Test Candidate Records</h3>
+                  <p className="text-xs text-slate-text mt-0.5">
+                    Select any false, mock, or test candidates to permanently delete from this election.
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setShowPurgeModal(false)} className="text-slate-text hover:text-navy-deep">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between mb-3 px-1 text-xs">
+              <span className="font-semibold text-slate-text">
+                {selectedPurgeIds.length} of {candidates.length} candidates selected
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedPurgeIds.length === candidates.length) {
+                    setSelectedPurgeIds([]);
+                  } else {
+                    setSelectedPurgeIds(candidates.map(c => c.id));
+                  }
+                }}
+                className="text-civic hover:underline font-medium"
+              >
+                {selectedPurgeIds.length === candidates.length ? 'Deselect All' : 'Select All'}
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1 border rounded-lg border-slate-border p-2">
+              {candidates.map((c) => {
+                const pos = positions.find(p => p.id === c.position_id);
+                const isSelected = selectedPurgeIds.includes(c.id);
+                return (
+                  <label
+                    key={c.id}
+                    className={`flex items-center justify-between gap-3 p-2.5 rounded-lg border cursor-pointer transition-all ${
+                      isSelected
+                        ? 'border-error-deep bg-error-bg/20'
+                        : 'border-slate-border bg-slate-canvas hover:border-slate-frame'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedPurgeIds([...selectedPurgeIds, c.id]);
+                          } else {
+                            setSelectedPurgeIds(selectedPurgeIds.filter(id => id !== c.id));
+                          }
+                        }}
+                        className="accent-error-deep rounded w-4 h-4"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-navy-deep truncate">{c.name}</p>
+                        <p className="text-xs text-slate-text">
+                          USN: {c.student_id} · Branch: {c.faculty} {pos ? `· Post: ${pos.name}` : ''}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="badge bg-slate-wash text-navy-deep text-[10px]">
+                      {c.application_status}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className="mt-5 pt-4 border-t border-slate-border flex items-center justify-between gap-3">
+              <button
+                onClick={() => setShowPurgeModal(false)}
+                className="btn-secondary text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBatchPurge}
+                disabled={purging || selectedPurgeIds.length === 0}
+                className="btn-civic bg-error-deep hover:bg-red-700 text-white text-xs py-2 px-4 inline-flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                {purging ? 'Purging...' : `Permanently Delete Selected (${selectedPurgeIds.length})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Quick Custom Post Modal */}
       {showQuickCustomPostModal && (
@@ -1724,8 +1945,8 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
 
       {/* Dedicated Student Candidate Profile Creation Form */}
       {creatingStudentAccount && (
-        <div className="card mb-6 p-5 lg:p-6 animate-fadeIn border-2 border-navy/20 bg-slate-50/50">
-          <div className="mb-5 flex items-center justify-between">
+        <div className="card mb-6 p-5 lg:p-6 animate-fadeIn border-2 border-navy/20 bg-slate-50/70">
+          <div className="mb-5 flex items-center justify-between pb-3 border-b border-slate-border">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-navy text-white flex items-center justify-center">
                 <UserPlus className="w-5 h-5 text-emerald-vote" />
@@ -1733,7 +1954,7 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
               <div>
                 <h2 className="headline-md">Create Student Candidate Profile</h2>
                 <p className="text-xs text-slate-text mt-0.5">
-                  Creates an institutional voter account, student profile, registers them for an elective post, and grants voting eligibility.
+                  Subdivided profile registration: Contested post, academic identity, candidate intro, logo upload, and voter credentials.
                 </p>
               </div>
             </div>
@@ -1742,154 +1963,205 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
             </button>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field
-              label="Student full name *"
-              value={studentForm.fullName}
-              onChange={(v) => setStudentForm({ ...studentForm, fullName: v })}
-              placeholder="e.g. Rohan Gowda"
-            />
-            <Field
-              label="University roll number (USN) *"
-              value={studentForm.studentId}
-              onChange={(v) => setStudentForm({ ...studentForm, studentId: v })}
-              placeholder="e.g. 1BG22CS088"
-            />
-            <Field
-              label="Student institutional email (Login ID) *"
-              type="email"
-              value={studentForm.email}
-              onChange={(v) => setStudentForm({ ...studentForm, email: v })}
-              placeholder="e.g. rohan.gowda@bgsit.ac.in"
-            />
-            <Field
-              label="Initial account password *"
-              type="text"
-              value={studentForm.password}
-              onChange={(v) => setStudentForm({ ...studentForm, password: v })}
-              placeholder="e.g. Student@123"
-            />
-
-            <div>
-              <label className="label-text mb-1.5 block">Department *</label>
-              <select
-                value={studentForm.department}
-                onChange={(e) => setStudentForm({ ...studentForm, department: e.target.value })}
-                className="input-field"
-              >
-                <option value="">Select department...</option>
-                {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
-              </select>
-            </div>
-
-            <div>
-              <label className="label-text mb-1.5 block">Semester</label>
-              <select
-                value={studentForm.semester}
-                onChange={(e) => setStudentForm({ ...studentForm, semester: e.target.value })}
-                className="input-field"
-              >
-                {SEMESTERS.map((s) => <option key={s} value={s}>Semester {s}</option>)}
-              </select>
-            </div>
-
-            {/* Position with quick custom post button */}
-            <div className="md:col-span-2">
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="label-text">Contested post / position *</label>
-                <button
-                  type="button"
-                  onClick={() => setShowQuickCustomPostModal(true)}
-                  className="text-xs font-semibold text-civic hover:underline flex items-center gap-1"
-                >
-                  <Plus className="w-3.5 h-3.5" /> Create new custom post of your choice
-                </button>
+          <div className="space-y-4">
+            {/* Subdivision 1: Contested Post & Position */}
+            <div className="rounded-lg border border-slate-border bg-white p-4 shadow-xs">
+              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-border">
+                <Target className="w-4 h-4 text-civic" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-navy-deep">
+                  Subdivision 1: Contested Post & Position
+                </h3>
               </div>
-              <select
-                value={studentForm.positionId}
-                onChange={(e) => setStudentForm({ ...studentForm, positionId: e.target.value })}
-                className="input-field"
-              >
-                <option value="">Select post for candidate...</option>
-                {positions.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name} {p.status !== 'active' ? '(Inactive)' : ''}</option>
-                ))}
-              </select>
-            </div>
-
-            <Field
-              label="Party / Alliance / Slate name"
-              value={studentForm.party}
-              onChange={(v) => setStudentForm({ ...studentForm, party: v })}
-              placeholder="e.g. Student Democratic Alliance (or 'Independent')"
-            />
-
-            {/* Symbol */}
-            <div>
-              <label className="label-text mb-1.5 block">Party or candidate symbol</label>
-              <input
-                type="text"
-                value={studentForm.symbol}
-                onChange={(e) => setStudentForm({ ...studentForm, symbol: e.target.value })}
-                placeholder="e.g. 🛡️ Shield of Integrity"
-                className="input-field"
-              />
-            </div>
-
-            {/* Candidate Logo / Photo Upload */}
-            <div className="md:col-span-2 rounded-lg border border-slate-border bg-slate-canvas p-4">
-              <label className="label-text mb-2 block flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <ImageIcon className="w-4 h-4 text-civic" /> Upload candidate logo or photo
-                </span>
-                {studentForm.imageUrl && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="label-text">Select contested post / office *</label>
                   <button
                     type="button"
-                    onClick={() => setStudentForm({ ...studentForm, imageUrl: '' })}
-                    className="text-xs text-error-deep hover:underline"
+                    onClick={() => setShowQuickCustomPostModal(true)}
+                    className="text-xs font-semibold text-civic hover:underline flex items-center gap-1"
                   >
-                    Remove logo
+                    <Plus className="w-3.5 h-3.5" /> Create new custom post of your choice
                   </button>
-                )}
-              </label>
+                </div>
+                <select
+                  value={studentForm.positionId}
+                  onChange={(e) => setStudentForm({ ...studentForm, positionId: e.target.value })}
+                  className="input-field"
+                >
+                  <option value="">Select elective post for student candidate...</option>
+                  {positions.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} {p.status !== 'active' ? '(Inactive)' : ''}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
 
-              <div className="flex flex-col sm:flex-row items-center gap-4">
-                <div className="w-20 h-20 rounded-lg overflow-hidden shrink-0 border-2 border-slate-border bg-white flex items-center justify-center">
-                  {studentForm.imageUrl ? (
-                    <img src={studentForm.imageUrl} alt="Candidate Logo" className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="text-center text-slate-muted">
-                      <ImageIcon className="w-6 h-6 mx-auto mb-1" />
-                      <span className="text-[10px]">No Logo</span>
-                    </div>
+            {/* Subdivision 2: Candidate Academic Details & Credentials */}
+            <div className="rounded-lg border border-slate-border bg-white p-4 shadow-xs">
+              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-border">
+                <GraduationCap className="w-4 h-4 text-civic" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-navy-deep">
+                  Subdivision 2: Candidate Identity & Academic Details
+                </h3>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field
+                  label="Candidate full name *"
+                  value={studentForm.fullName}
+                  onChange={(v) => setStudentForm({ ...studentForm, fullName: v })}
+                  placeholder="Enter student candidate full name"
+                />
+                <Field
+                  label="University roll number (USN) *"
+                  value={studentForm.studentId}
+                  onChange={(v) => setStudentForm({ ...studentForm, studentId: v })}
+                  placeholder="e.g. 1BG22CS088"
+                />
+                <div>
+                  <label className="label-text mb-1.5 block">Branch / Department *</label>
+                  <select
+                    value={studentForm.department}
+                    onChange={(e) => setStudentForm({ ...studentForm, department: e.target.value })}
+                    className="input-field"
+                  >
+                    <option value="">Select branch / department...</option>
+                    {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="label-text mb-1.5 block">Semester *</label>
+                  <select
+                    value={studentForm.semester}
+                    onChange={(e) => setStudentForm({ ...studentForm, semester: e.target.value })}
+                    className="input-field"
+                  >
+                    {SEMESTERS.map((s) => <option key={s} value={s}>Semester {s}</option>)}
+                  </select>
+                </div>
+                <Field
+                  label="Student login email ID *"
+                  type="email"
+                  value={studentForm.email}
+                  onChange={(v) => setStudentForm({ ...studentForm, email: v })}
+                  placeholder="student@bgsit.ac.in"
+                />
+                <Field
+                  label="Initial account password *"
+                  type="text"
+                  value={studentForm.password}
+                  onChange={(v) => setStudentForm({ ...studentForm, password: v })}
+                  placeholder="e.g. Student@2026"
+                />
+              </div>
+            </div>
+
+            {/* Subdivision 3: About The Candidate & Campaign Pitch */}
+            <div className="rounded-lg border border-slate-border bg-white p-4 shadow-xs">
+              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-border">
+                <FileText className="w-4 h-4 text-civic" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-navy-deep">
+                  Subdivision 3: About Candidate & Campaign Pitch
+                </h3>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="label-text mb-1.5 block">
+                    About the candidate / Short intro (Bio or personal background) *
+                  </label>
+                  <input
+                    type="text"
+                    className="input-field"
+                    value={studentForm.intro}
+                    onChange={(e) => setStudentForm({ ...studentForm, intro: e.target.value })}
+                    placeholder="e.g. 3rd-year CS student passionate about campus tech, coding hackathons, and student welfare."
+                  />
+                  <p className="text-[11px] text-slate-text mt-1">
+                    This short intro is highlighted directly on the student ballot next to their name.
+                  </p>
+                </div>
+                <div>
+                  <label className="label-text mb-1.5 block">Full campaign manifesto & vision statement</label>
+                  <textarea
+                    className="input-field min-h-20 h-auto py-2.5"
+                    value={studentForm.manifesto}
+                    onChange={(e) => setStudentForm({ ...studentForm, manifesto: e.target.value })}
+                    placeholder="Key campaign pledges, policy goals, and message to student voters."
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Subdivision 4: Party, Symbol & Candidate Logo Upload */}
+            <div className="rounded-lg border border-slate-border bg-white p-4 shadow-xs">
+              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-border">
+                <ImageIcon className="w-4 h-4 text-civic" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-navy-deep">
+                  Subdivision 4: Party, Symbol & Candidate Logo / Photo Upload
+                </h3>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 mb-4">
+                <Field
+                  label="Party / Alliance / Slate name"
+                  value={studentForm.party}
+                  onChange={(v) => setStudentForm({ ...studentForm, party: v })}
+                  placeholder="e.g. Student Democratic Alliance (or 'Independent')"
+                />
+                <div>
+                  <label className="label-text mb-1.5 block">Party or candidate symbol</label>
+                  <input
+                    type="text"
+                    value={studentForm.symbol}
+                    onChange={(e) => setStudentForm({ ...studentForm, symbol: e.target.value })}
+                    placeholder="e.g. 🛡️ Shield of Integrity"
+                    className="input-field"
+                  />
+                </div>
+              </div>
+
+              {/* Logo Upload Box */}
+              <div className="rounded-lg border border-slate-border bg-slate-canvas p-3.5">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-navy-deep flex items-center gap-1.5">
+                    <Upload className="w-3.5 h-3.5 text-civic" /> Upload Candidate Logo / Official Photo
+                  </span>
+                  {studentForm.imageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setStudentForm({ ...studentForm, imageUrl: '' })}
+                      className="text-xs text-error-deep hover:underline"
+                    >
+                      Remove logo
+                    </button>
                   )}
                 </div>
 
-                <div className="flex-1 w-full space-y-2">
-                  <label className="btn-secondary inline-flex items-center gap-2 cursor-pointer text-xs py-2 px-3">
-                    <Upload className="w-3.5 h-3.5 text-civic" />
-                    <span>{uploadingImage ? 'Processing...' : 'Upload logo / photo (PNG / JPG / WebP)'}</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) => handleImageUpload(e, 'student')}
-                      className="hidden"
-                    />
-                  </label>
-                  <p className="text-[11px] text-slate-text">Images are automatically scaled and optimized for ballot rendering.</p>
+                <div className="flex flex-col sm:flex-row items-center gap-4">
+                  <div className="w-20 h-20 rounded-lg overflow-hidden shrink-0 border-2 border-slate-border bg-white flex items-center justify-center">
+                    {studentForm.imageUrl ? (
+                      <img src={studentForm.imageUrl} alt="Candidate Logo" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="text-center text-slate-muted">
+                        <ImageIcon className="w-6 h-6 mx-auto mb-1" />
+                        <span className="text-[10px]">No Logo</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 w-full space-y-2">
+                    <label className="btn-secondary inline-flex items-center gap-2 cursor-pointer text-xs py-2 px-3">
+                      <Upload className="w-3.5 h-3.5 text-civic" />
+                      <span>{uploadingImage ? 'Processing...' : 'Upload logo / photo (PNG / JPG / WebP)'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => handleImageUpload(e, 'student')}
+                        className="hidden"
+                      />
+                    </label>
+                    <p className="text-[11px] text-slate-text">Images are manually uploaded and formatted for ballot rendering.</p>
+                  </div>
                 </div>
               </div>
-            </div>
-
-            {/* Manifesto */}
-            <div className="md:col-span-2">
-              <label className="label-text mb-1.5 block">Candidate manifesto & vision statement</label>
-              <textarea
-                className="input-field min-h-20 h-auto py-2.5"
-                value={studentForm.manifesto}
-                onChange={(e) => setStudentForm({ ...studentForm, manifesto: e.target.value })}
-                placeholder="Key campaign pledges, goals, and pitch to voters."
-              />
             </div>
           </div>
 
@@ -1925,148 +2197,215 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
 
       {/* Add / Edit Candidate Form */}
       {(adding || editingCandidate) && (
-        <div className="card mb-6 p-5 lg:p-6 animate-fadeIn border-2 border-civic/20">
-          <div className="mb-5 flex items-center justify-between">
+        <div className="card mb-6 p-5 lg:p-6 animate-fadeIn border-2 border-civic/20 bg-slate-50/70">
+          <div className="mb-5 flex items-center justify-between pb-3 border-b border-slate-border">
             <div>
               <h2 className="headline-md">{editingCandidate ? `Edit candidate: ${editingCandidate.name}` : 'New candidate registration'}</h2>
-              <p className="text-xs text-slate-text mt-0.5">Enter academic details, political party or alliance, manifesto, and upload candidate logo.</p>
+              <p className="text-xs text-slate-text mt-0.5">
+                Subdivided candidate registration: Post/position, academic info, intro & manifesto, and logo upload.
+              </p>
             </div>
             <button onClick={() => { setAdding(false); setEditingCandidate(null); }} className="text-slate-text hover:text-navy-deep">
               <X className="h-5 w-5" />
             </button>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Candidate full name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} placeholder="e.g. Aarav Sharma" />
-            <Field label="Student USN / Roll number" value={form.studentId} onChange={(v) => setForm({ ...form, studentId: v })} placeholder="e.g. 1BG21CS045" />
-
-            <div>
-              <label className="label-text mb-1.5 block">Position / Contested post</label>
-              <select value={form.positionId} onChange={(e) => setForm({ ...form, positionId: e.target.value })} className="input-field">
-                <option value="">Select contested position...</option>
-                {positions.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name} {p.status !== 'active' ? '(Inactive)' : ''}</option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="label-text mb-1.5 block">Department</label>
-              <select value={form.faculty} onChange={(e) => setForm({ ...form, faculty: e.target.value })} className="input-field">
-                <option value="">Select department...</option>
-                {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
-              </select>
-            </div>
-
-            <div>
-              <label className="label-text mb-1.5 block">Semester</label>
-              <select value={form.semester} onChange={(e) => setForm({ ...form, semester: e.target.value })} className="input-field">
-                <option value="">Select semester...</option>
-                {SEMESTERS.map((s) => <option key={s} value={s}>Semester {s}</option>)}
-              </select>
-            </div>
-
-            <Field
-              label="Party / Alliance / Slate name"
-              value={form.party}
-              onChange={(v) => setForm({ ...form, party: v })}
-              placeholder="e.g. Student Democratic Front (or 'Independent')"
-            />
-
-            {/* Candidate / Party Symbol */}
-            <div className="md:col-span-2">
-              <label className="label-text mb-1.5 block">Party or candidate symbol</label>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {SYMBOL_PRESETS.map((sym) => (
-                  <button
-                    key={sym}
-                    type="button"
-                    onClick={() => setForm({ ...form, symbol: sym })}
-                    className={`rounded-full px-2.5 py-1 text-xs font-medium border transition-colors ${
-                      form.symbol === sym
-                        ? 'border-civic bg-civic-wash text-civic'
-                        : 'border-slate-border bg-white text-navy-deep hover:border-slate-frame'
-                    }`}
-                  >
-                    {sym}
-                  </button>
-                ))}
+          <div className="space-y-4">
+            {/* Subdivision 1: Contested Post & Position */}
+            <div className="rounded-lg border border-slate-border bg-white p-4 shadow-xs">
+              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-border">
+                <Target className="w-4 h-4 text-civic" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-navy-deep">
+                  Subdivision 1: Contested Post & Position
+                </h3>
               </div>
-              <input
-                type="text"
-                value={form.symbol}
-                onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-                placeholder="Or type custom symbol description (e.g. Rising Sun, Scales of Justice)"
-                className="input-field"
-              />
+              <div>
+                <label className="label-text mb-1.5 block">Position / Contested post *</label>
+                <select value={form.positionId} onChange={(e) => setForm({ ...form, positionId: e.target.value })} className="input-field">
+                  <option value="">Select contested position...</option>
+                  {positions.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} {p.status !== 'active' ? '(Inactive)' : ''}</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
-            {/* Logo / Photo Upload */}
-            <div className="md:col-span-2 rounded-lg border border-slate-border bg-slate-canvas p-4">
-              <label className="label-text mb-2 block flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <ImageIcon className="w-4 h-4 text-civic" /> Upload candidate logo or photo
-                </span>
-                {form.imageUrl && (
-                  <button
-                    type="button"
-                    onClick={() => setForm({ ...form, imageUrl: '' })}
-                    className="text-xs text-error-deep hover:underline"
-                  >
-                    Remove logo
-                  </button>
-                )}
-              </label>
-
-              <div className="flex flex-col sm:flex-row items-center gap-4">
-                {/* Preview Thumbnail */}
-                <div className="w-20 h-20 rounded-lg overflow-hidden shrink-0 border-2 border-slate-border bg-white flex items-center justify-center">
-                  {form.imageUrl ? (
-                    <img src={form.imageUrl} alt="Candidate Logo" className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="text-center text-slate-muted">
-                      <ImageIcon className="w-6 h-6 mx-auto mb-1" />
-                      <span className="text-[10px]">No Logo</span>
-                    </div>
-                  )}
+            {/* Subdivision 2: Candidate Academic Details */}
+            <div className="rounded-lg border border-slate-border bg-white p-4 shadow-xs">
+              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-border">
+                <GraduationCap className="w-4 h-4 text-civic" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-navy-deep">
+                  Subdivision 2: Candidate Academic & Personal Identity
+                </h3>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field
+                  label="Candidate full name *"
+                  value={form.name}
+                  onChange={(v) => setForm({ ...form, name: v })}
+                  placeholder="Enter full name manually"
+                />
+                <Field
+                  label="Student USN / Roll number *"
+                  value={form.studentId}
+                  onChange={(v) => setForm({ ...form, studentId: v })}
+                  placeholder="e.g. 1BG21CS045"
+                />
+                <div>
+                  <label className="label-text mb-1.5 block">Branch / Department *</label>
+                  <select value={form.faculty} onChange={(e) => setForm({ ...form, faculty: e.target.value })} className="input-field">
+                    <option value="">Select department...</option>
+                    {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
                 </div>
+                <div>
+                  <label className="label-text mb-1.5 block">Semester</label>
+                  <select value={form.semester} onChange={(e) => setForm({ ...form, semester: e.target.value })} className="input-field">
+                    <option value="">Select semester...</option>
+                    {SEMESTERS.map((s) => <option key={s} value={s}>Semester {s}</option>)}
+                  </select>
+                </div>
+              </div>
+            </div>
 
-                <div className="flex-1 w-full space-y-2">
-                  <label className="btn-secondary inline-flex items-center gap-2 cursor-pointer text-xs py-2 px-3">
-                    <Upload className="w-3.5 h-3.5 text-civic" />
-                    <span>{uploadingImage ? 'Processing image...' : 'Choose image file (PNG / JPG / WebP)'}</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) => handleImageUpload(e, editingCandidate ? 'edit' : 'candidate')}
-                      className="hidden"
-                    />
+            {/* Subdivision 3: About Candidate & Campaign Pitch */}
+            <div className="rounded-lg border border-slate-border bg-white p-4 shadow-xs">
+              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-border">
+                <FileText className="w-4 h-4 text-civic" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-navy-deep">
+                  Subdivision 3: About The Candidate & Campaign Pitch
+                </h3>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="label-text mb-1.5 block">
+                    About the candidate / Short intro (Bio or personal background)
                   </label>
-                  <p className="text-[11px] text-slate-text">Images are automatically scaled and optimized for ballot rendering.</p>
                   <input
                     type="text"
-                    value={form.imageUrl}
-                    onChange={(e) => setForm({ ...form, imageUrl: e.target.value })}
-                    placeholder="Or enter direct image URL (https://...)"
-                    className="input-field text-xs py-1.5"
+                    className="input-field"
+                    value={form.intro}
+                    onChange={(e) => setForm({ ...form, intro: e.target.value })}
+                    placeholder="e.g. 3rd-year CS student passionate about campus tech, hackathons, and student welfare."
+                  />
+                  <p className="text-[11px] text-slate-text mt-1">Short intro displayed on the student ballot next to candidate details.</p>
+                </div>
+                <div>
+                  <label className="label-text mb-1.5 block">Manifesto / Agenda & Vision</label>
+                  <textarea
+                    className="input-field min-h-24 h-auto py-3"
+                    value={form.manifesto}
+                    onChange={(e) => setForm({ ...form, manifesto: e.target.value })}
+                    placeholder="The candidate's core campaign pledges, policy goals, and message to student voters."
                   />
                 </div>
               </div>
             </div>
 
-            {/* Manifesto */}
-            <div className="md:col-span-2">
-              <label className="label-text mb-1.5 block">Manifesto / Agenda & Vision</label>
-              <textarea
-                className="input-field min-h-24 h-auto py-3"
-                value={form.manifesto}
-                onChange={(e) => setForm({ ...form, manifesto: e.target.value })}
-                placeholder="The candidate's core campaign pledges, policy goals, and message to student voters."
-              />
+            {/* Subdivision 4: Party, Symbol & Candidate Logo / Photo Upload */}
+            <div className="rounded-lg border border-slate-border bg-white p-4 shadow-xs">
+              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-border">
+                <ImageIcon className="w-4 h-4 text-civic" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-navy-deep">
+                  Subdivision 4: Party, Symbol & Candidate Logo / Photo Upload
+                </h3>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 mb-4">
+                <Field
+                  label="Party / Alliance / Slate name"
+                  value={form.party}
+                  onChange={(v) => setForm({ ...form, party: v })}
+                  placeholder="e.g. Student Democratic Front (or 'Independent')"
+                />
+                <div>
+                  <label className="label-text mb-1.5 block">Party or candidate symbol</label>
+                  <input
+                    type="text"
+                    value={form.symbol}
+                    onChange={(e) => setForm({ ...form, symbol: e.target.value })}
+                    placeholder="e.g. 🛡️ Shield of Integrity"
+                    className="input-field"
+                  />
+                </div>
+              </div>
+
+              {/* Symbol Presets */}
+              <div className="mb-4">
+                <span className="text-xs text-slate-text block mb-1.5">Quick symbol selection:</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {SYMBOL_PRESETS.map((sym) => (
+                    <button
+                      key={sym}
+                      type="button"
+                      onClick={() => setForm({ ...form, symbol: sym })}
+                      className={`rounded-full px-2.5 py-1 text-xs font-medium border transition-colors ${
+                        form.symbol === sym
+                          ? 'border-civic bg-civic-wash text-civic'
+                          : 'border-slate-border bg-white text-navy-deep hover:border-slate-frame'
+                      }`}
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Logo / Photo Upload */}
+              <div className="rounded-lg border border-slate-border bg-slate-canvas p-3.5">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-navy-deep flex items-center gap-1.5">
+                    <Upload className="w-3.5 h-3.5 text-civic" /> Upload candidate logo or photo
+                  </span>
+                  {form.imageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, imageUrl: '' })}
+                      className="text-xs text-error-deep hover:underline"
+                    >
+                      Remove logo
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-center gap-4">
+                  {/* Preview Thumbnail */}
+                  <div className="w-20 h-20 rounded-lg overflow-hidden shrink-0 border-2 border-slate-border bg-white flex items-center justify-center">
+                    {form.imageUrl ? (
+                      <img src={form.imageUrl} alt="Candidate Logo" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="text-center text-slate-muted">
+                        <ImageIcon className="w-6 h-6 mx-auto mb-1" />
+                        <span className="text-[10px]">No Logo</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 w-full space-y-2">
+                    <label className="btn-secondary inline-flex items-center gap-2 cursor-pointer text-xs py-2 px-3">
+                      <Upload className="w-3.5 h-3.5 text-civic" />
+                      <span>{uploadingImage ? 'Processing image...' : 'Choose image file (PNG / JPG / WebP)'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => handleImageUpload(e, editingCandidate ? 'edit' : 'candidate')}
+                        className="hidden"
+                      />
+                    </label>
+                    <p className="text-[11px] text-slate-text">Images are automatically scaled and optimized for ballot rendering.</p>
+                    <input
+                      type="text"
+                      value={form.imageUrl}
+                      onChange={(e) => setForm({ ...form, imageUrl: e.target.value })}
+                      placeholder="Or enter direct image URL (https://...)"
+                      className="input-field text-xs py-1.5"
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
 
             {adding && (
-              <div className="md:col-span-2">
+              <div className="rounded-lg border border-slate-border bg-white p-3">
                 <label className="flex items-center gap-2 text-sm text-navy-deep cursor-pointer">
                   <input
                     type="checkbox"
@@ -2270,21 +2609,22 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
                 }`}
               >
                 <div className="flex flex-col md:flex-row items-start justify-between gap-4">
-                  {/* Avatar / Logo */}
+                  {/* Candidate Logo / Photo Thumbnail */}
                   <div className="flex items-start gap-3.5 flex-1 min-w-0">
-                    <div className="w-14 h-14 rounded-lg overflow-hidden shrink-0 border border-slate-border bg-white flex items-center justify-center shadow-xs">
+                    <div className="w-16 h-16 rounded-lg overflow-hidden shrink-0 border border-slate-border bg-white flex items-center justify-center shadow-xs">
                       {candidate.image_url ? (
                         <img src={candidate.image_url} alt={candidate.name} className="w-full h-full object-cover" />
                       ) : (
-                        <div className="w-full h-full bg-civic-wash text-civic flex items-center justify-center font-bold text-lg">
+                        <div className="w-full h-full bg-civic-wash text-civic flex items-center justify-center font-bold text-xl">
                           {candidate.name.charAt(0)}
                         </div>
                       )}
                     </div>
 
                     <div className="flex-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-2 mb-1">
-                        <h3 className="font-semibold text-navy-deep text-base">{candidate.name}</h3>
+                      {/* Post & Name Header */}
+                      <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                        <h3 className="font-bold text-navy-deep text-base">{candidate.name}</h3>
                         {isDisqualified ? (
                           <span className="badge bg-error-bg text-error-deep border border-error/30 font-bold inline-flex items-center gap-1">
                             <Ban className="w-3 h-3" /> Disqualified
@@ -2294,27 +2634,44 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
                         )}
 
                         {pos && (
-                          <span className="badge bg-civic-wash text-civic border border-civic/20 text-xs">
-                            {pos.name}
-                          </span>
-                        )}
-
-                        {candidate.meta?.party && (
-                          <span className="badge bg-slate-wash text-navy-deep border border-slate-border text-xs">
-                            Party: {candidate.meta.party}
-                          </span>
-                        )}
-
-                        {candidate.meta?.symbol && (
-                          <span className="badge bg-amber-bg text-amber-seal border border-amber-border text-xs">
-                            {candidate.meta.symbol}
+                          <span className="badge bg-civic-wash text-civic border border-civic/20 font-semibold text-xs inline-flex items-center gap-1">
+                            <Target className="w-3 h-3" /> Post: {pos.name}
                           </span>
                         )}
                       </div>
 
-                      <p className="text-xs text-slate-text">
-                        {candidate.student_id} · {candidate.faculty} {candidate.semester ? `· Sem ${candidate.semester}` : ''}
-                      </p>
+                      {/* Subdivided details: Academic identity */}
+                      <div className="flex flex-wrap items-center gap-2 mb-2 text-xs">
+                        <span className="badge bg-slate-wash text-navy-deep border border-slate-border font-mono">
+                          USN: {candidate.student_id}
+                        </span>
+                        <span className="badge bg-slate-wash text-navy-deep border border-slate-border inline-flex items-center gap-1">
+                          <GraduationCap className="w-3 h-3 text-civic" /> Branch: {candidate.faculty}
+                        </span>
+                        {candidate.semester && (
+                          <span className="badge bg-slate-wash text-navy-deep border border-slate-border">
+                            Semester {candidate.semester}
+                          </span>
+                        )}
+                        {candidate.meta?.party && (
+                          <span className="badge bg-blue-50 text-blue-900 border border-blue-200">
+                            Party: {candidate.meta.party}
+                          </span>
+                        )}
+                        {candidate.meta?.symbol && (
+                          <span className="badge bg-amber-bg text-amber-seal border border-amber-border">
+                            Symbol: {candidate.meta.symbol}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Subdivided detail: About the candidate / Short Intro */}
+                      {candidate.meta?.intro && (
+                        <div className="mt-2 rounded-lg border border-civic/20 bg-civic-wash/40 p-2.5 text-xs text-navy-deep">
+                          <span className="font-bold text-civic mr-1.5">About the candidate:</span>
+                          <span className="italic font-medium">"{candidate.meta.intro}"</span>
+                        </div>
+                      )}
 
                       {/* Disqualification Reason Alert */}
                       {isDisqualified && (
@@ -2337,9 +2694,10 @@ function CandidateManager({ election, positions, candidates, profile, onNotice, 
 
                       {/* Manifesto preview */}
                       {candidate.manifesto && (
-                        <p className="mt-2 text-xs text-slate-text leading-relaxed line-clamp-2">
+                        <div className="mt-2 text-xs text-slate-text leading-relaxed">
+                          <span className="font-semibold text-slate-text mr-1">Manifesto & Agenda:</span>
                           {candidate.manifesto}
-                        </p>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -3346,29 +3704,80 @@ function ControlPanel({ election, participation, onChange, onNotice, onRefresh }
   );
 }
 
-/* --- Results Panel --- */
-function ResultsPanel({ elections, participation }: { elections: Election[]; participation: Record<string, number> }) {
+/* --- Results Panel with Live Auto-Counting and Official Declaration --- */
+function ResultsPanel({
+  elections,
+  selectedElection,
+  onSelectElection,
+  onRefresh,
+}: {
+  elections: Election[];
+  selectedElection: Election | null;
+  onSelectElection: (e: Election) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [activeElectionId, setActiveElectionId] = useState<string>(
+    selectedElection?.id || (elections.length > 0 ? elections[0].id : '')
+  );
+
+  useEffect(() => {
+    if (selectedElection) {
+      setActiveElectionId(selectedElection.id);
+    } else if (elections.length > 0 && !activeElectionId) {
+      setActiveElectionId(elections[0].id);
+    }
+  }, [selectedElection?.id, elections]);
+
+  const activeElection = elections.find((e) => e.id === activeElectionId) || selectedElection || (elections.length > 0 ? elections[0] : null);
+
+  if (elections.length === 0) {
+    return <Empty text="No elections found. Create an election first to view auto-counted votes and results." />;
+  }
+
   return (
     <>
-      <div className="mb-8">
-        <p className="label-text mb-2 text-civic">Reporting</p>
-        <h1 className="headline-lg">Results</h1>
-        <p className="mt-2 text-sm text-slate-text">Participation totals are shown without exposing how any individual voted.</p>
-      </div>
-      {elections.length === 0 ? (
-        <Empty text="Results will appear after an election is published." />
-      ) : (
-        <div className="space-y-3">
-          {elections.map((election) => (
-            <div key={election.id} className="card flex items-center justify-between gap-4 p-5">
-              <div>
-                <h3 className="font-semibold text-navy-deep">{election.title}</h3>
-                <p className="mt-1 text-sm text-slate-text">{participation[election.id] ?? 0} recorded participations</p>
-              </div>
-              <StatusBadge status={election.status} />
-            </div>
-          ))}
+      <div className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <p className="label-text mb-2 text-civic">Election Outcomes & Real-Time Tabulation</p>
+          <h1 className="headline-lg">Auto-Counted Results & Declaration</h1>
+          <p className="mt-1 text-sm text-slate-text">
+            Live automated vote counting from secret ballots, winner certification, and official result publication.
+          </p>
         </div>
+
+        {/* Election Selector Switcher */}
+        {elections.length > 1 && (
+          <div className="flex items-center gap-2 bg-white p-2.5 rounded-lg border border-slate-border shadow-xs shrink-0">
+            <span className="text-xs font-semibold text-slate-text uppercase tracking-label">Active Election:</span>
+            <select
+              value={activeElection?.id}
+              onChange={(e) => {
+                const found = elections.find((el) => el.id === e.target.value);
+                if (found) {
+                  setActiveElectionId(found.id);
+                  onSelectElection(found);
+                }
+              }}
+              className="text-xs font-semibold text-navy-deep bg-slate-canvas border border-slate-frame rounded px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-civic"
+            >
+              {elections.map((el) => (
+                <option key={el.id} value={el.id}>
+                  {el.title} ({el.status.replace('_', ' ')})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+
+      {activeElection ? (
+        <ElectionResultsView
+          election={activeElection}
+          isFaculty={true}
+          onDeclared={onRefresh}
+        />
+      ) : (
+        <Empty text="Select an election to view results." />
       )}
     </>
   );

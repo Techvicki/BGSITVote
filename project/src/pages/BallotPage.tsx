@@ -8,6 +8,7 @@ import {
 import { parseElectionRules, parseCandidateManifesto, type ElectionRule } from '@/lib/electionRules';
 import LiveCountdownTimer from '@/components/LiveCountdownTimer';
 import { computeTimerState, type TimerState } from '@/lib/electionTimer';
+import ElectionResultsView from '@/components/ElectionResultsView';
 
 type Props = {
   election: Election;
@@ -25,6 +26,7 @@ export default function BallotPage({ election, onBack }: Props) {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [rules, setRules] = useState<ElectionRule[]>([]);
   const [showRulesModal, setShowRulesModal] = useState(false);
+  const [showResultsModal, setShowResultsModal] = useState(false);
   const [existingVote, setExistingVote] = useState<Vote | null>(null);
   const [selectedIds, setSelectedIds] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -311,6 +313,28 @@ export default function BallotPage({ election, onBack }: Props) {
 
         {renderStatusBanner()}
 
+        {/* Declared Results Callout Banner */}
+        {election.status === 'results_published' && (
+          <div className="card p-5 mb-6 bg-emerald-bg border-emerald-border animate-fadeIn flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <Trophy className="w-6 h-6 text-emerald-deep mt-0.5 shrink-0" />
+              <div>
+                <p className="text-sm font-bold text-emerald-deep">Official Election Results Declared & Published!</p>
+                <p className="text-xs text-emerald-deep/80 mt-0.5">
+                  Vote counting is complete. View certified winner declarations, vote shares, and printable certificates.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowResultsModal(true)}
+              className="btn-civic bg-emerald-deep hover:bg-emerald-700 text-white text-xs py-2 px-3.5 inline-flex items-center gap-1.5 shrink-0 shadow-xs"
+            >
+              <Trophy className="w-3.5 h-3.5" /> View Declared Results
+            </button>
+          </div>
+        )}
+
         {/* Ballot instructions */}
         <div className="card p-4 mb-6">
           <div className="flex items-start gap-3">
@@ -528,6 +552,19 @@ export default function BallotPage({ election, onBack }: Props) {
           </div>
         </div>
       )}
+
+      {/* Official Results Modal */}
+      {showResultsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-navy-deep/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white rounded-xl shadow-tier2 max-w-4xl w-full p-6 animate-scaleIn max-h-[90vh] overflow-y-auto relative">
+            <ElectionResultsView
+              election={election}
+              isFaculty={false}
+              onBack={() => setShowResultsModal(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -634,15 +671,36 @@ export default function BallotPage({ election, onBack }: Props) {
               )}
             </div>
 
-            <div className="flex items-center gap-3 text-xs text-slate-text mb-2">
-              <span className="flex items-center gap-1">
-                <GraduationCap className="w-3 h-3" /> {candidate.faculty}
+            {/* Subdivided Academic Identity */}
+            <div className="flex flex-wrap items-center gap-2 mb-2 text-xs">
+              <span className="badge bg-slate-wash text-navy-deep border border-slate-border font-mono">
+                USN: {candidate.student_id}
               </span>
-              <span>· {candidate.student_id}</span>
-              {candidate.semester && <span>· Sem {candidate.semester}</span>}
+              <span className="badge bg-slate-wash text-navy-deep border border-slate-border inline-flex items-center gap-1">
+                <GraduationCap className="w-3 h-3 text-civic" /> Branch: {candidate.faculty}
+              </span>
+              {candidate.semester && (
+                <span className="badge bg-slate-wash text-navy-deep border border-slate-border">
+                  Sem {candidate.semester}
+                </span>
+              )}
             </div>
 
-            <p className="text-sm text-slate-text leading-relaxed">{candidate.manifesto}</p>
+            {/* Subdivided detail: About the candidate / Short Intro */}
+            {candidate.meta?.intro && (
+              <div className="mb-2.5 rounded-lg border border-civic/20 bg-civic-wash/40 p-2.5 text-xs text-navy-deep">
+                <span className="font-bold text-civic mr-1.5">About the candidate:</span>
+                <span className="italic font-medium">"{candidate.meta.intro}"</span>
+              </div>
+            )}
+
+            {/* Campaign Manifesto */}
+            {candidate.manifesto && (
+              <div className="text-xs text-slate-text leading-relaxed">
+                <span className="font-semibold text-slate-text mr-1">Campaign Manifesto:</span>
+                {candidate.manifesto}
+              </div>
+            )}
           </div>
         </div>
       </div>
